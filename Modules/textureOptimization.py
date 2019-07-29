@@ -2,6 +2,7 @@ import numpy as np
 import time
 from sklearn.cluster import KMeans
 from numpy.lib.stride_tricks import as_strided
+import matplotlib.pyplot as plt
 
 
 class HierarchicalKMeansTree:
@@ -42,19 +43,19 @@ class HierarchicalKMeansTree:
     def search(self, x):
         node = self.tree
 
-        while not node.isLeaf:
+        while not node['isLeaf']:
             argmin_ix = 0
             min_dist = 99999999999
-            for i, branch in enumerate(node.branches):
-                dist = np.sum((branch.center - x)**2)
+            for i, branch in enumerate(node['branches']):
+                dist = np.sum((branch['center'] - x)**2)
                 if dist < min_dist:
                     argmin_ix = i
                     min_dist = dist
-            node = node.branches[argmin_ix].node
+            node = node['branches'][argmin_ix]['node']
 
-        dist = np.sum((node.entities - x)**2, axis=1)
+        dist = np.sum((node['entities'] - x)**2, axis=1)
         argmin_ix = np.argmin(dist)
-        return node.ptrs[argmin_ix]
+        return node['ptrs'][argmin_ix], node['entities'][argmin_ix]
 
 
 class TextureOptimization:
@@ -70,8 +71,8 @@ class TextureOptimization:
         """
         Zr, Zc = Z.shape[:2]
         Z_viewSize = (
-            Zr - W,
-            Zc - W,
+            Zr - W * 2,
+            Zc - W * 2,
             W * 2 + 1,
             W * 2 + 1,
             Z.shape[2]
@@ -84,74 +85,68 @@ class TextureOptimization:
         N = r * c
         p_dim = w * w * ch
         allBlockVecs = blocks.reshape(N, p_dim)
+        print('total block num of input:', N)
         currentTime = time.time()
         hierarchicalKMeansTree = HierarchicalKMeansTree(allBlockVecs)
         print('- built Hierarchical K-Means Tree')
-        print('elapsed:', time.time() - startTime, 'delta:', time.time() - currentTime)
+        print('elapsed:', time.time() - startTime,
+              'delta:', time.time() - currentTime)
 
         Xr, Xc = X.shape[:2]
-        p_rowRange = np.arange(W, Xr, W)
-        p_colRange = np.arange(W, Xc, W)
+        p_rowRange = np.arange(W, Xr, W + 1)
+        p_colRange = np.arange(W, Xc, W + 1)
+        p_rowRange[-1] = Xr - W - 1
+        p_colRange[-1] = Xc - W - 1
         row_p_num = len(p_rowRange)
         col_p_num = len(p_colRange)
 
-        # X_viewSize = (
-        #     row_p_num,
-        #     col_p_num,
-        #     w,
-        #     w,
-        #     ch
-        # )
-        # X_strides = (X.strides[0]*W, X.strides[0]*W) + X.strides
-        # ix = np.arange(Xr * Xc * ch).reshape(Xr, Xc, ch)
-        # px_ix = as_strided(ix, X_viewSize, X_strides)
-
-        currentTime = time.time()
-
-        # Xの画素値に関する線形方程式の係数行列. Ax=b の A
-        # とくに重みがなければ 0 か 1
-        print('- will build CoefMat of', (row_p_num * col_p_num * p_dim, Xr * Xc * ch))
-        CoefMat = np.zeros((row_p_num * col_p_num * p_dim, Xr * Xc * ch))
-
-        for (i, pos_y) in enumerate(p_rowRange):
-            for (j, pos_x) in enumerate(p_colRange):
-                for k in range(w):
-                    for l in range(w):
-                        for m in range(Z.shape[2]):
-                            row_ix = i * row_p_num + j * col_p_num + k * w + l * w + m
-                            col_ix = (pos_y + k - W) * Xr + (pos_x + l - W) + m
-                            CoefMat[row_ix, col_ix] = 1
-
-        print('- built CoefMat')
-        print('elapsed:', time.time() - startTime, 'delta:', time.time() - currentTime)
         itr = 0
-        # M-step で選ばれた Zp をすべて繋げたベクトルを作る. 線形方程式 Ax=b の b. 最初はランダムパッチで初期化
-        currentTime = time.time()
-        blockPtrs = np.random.choice(N, row_p_num * col_p_num)
+        print('x_p num:', row_p_num * col_p_num)
+        blockPtrs = np.zeros(row_p_num * col_p_num * ch, dtype='uint32')
+
         if init:
-            allZpVec = allBlockVecs[blockPtrs].flatten()
-            sol, res, _r, _s = np.linalg.lstsq(CoefMat, allZpVec, rcond=None)
-            X = sol.reshape(Xr, Xc, -1)
-            print('itr:', itr, 'E:', res, 'elapsed:', time.time() - startTime, 'delta:', time.time() - currentTime)
-            itr += 1
+            # 出力の初期化 簡単のため, 近傍がはみ出す部分も生成しておく
+            X = np.random.randint(0, 256, X.shape, dtype='uint8')
+
+        # 座標とチャンネルを指定すると1d-arrayとしてのindexが帰ってくる関数としての配列
+        X_ind1d = np.arange(Xr * Xc * ch).reshape(Xr, Xc, ch)
 
         while True:
             currentTime = time.time()
+            z_p_stacks = [[] for i in range(Xr * Xc * ch)]
             # Maximization: find nearest {z_p}
-            converge = True
-            for (i, pos_y) in enumerate(p_rowRange):
-                for (j, pos_x) in enumerate(p_colRange):
-                    x_p = X[(pos_y - W):(pos_y + W + 1), (pos_x - W):(pos_x + W + 1)].flatten()
-                    ptr = hierarchicalKMeansTree.search(x_p)
-                    converge &= (blockPtrs[i * col_p_num + j] != ptr)
-                    blockPtrs[i * col_p_num + j] = ptr
-            if converge:
+            diff = 0
+            searchCnt = 0
+            for pos_y in p_rowRange:
+                for pos_x in p_colRange:
+                    x_p = X[(pos_y - W):(pos_y + W + 1),
+                            (pos_x - W):(pos_x + W + 1)].flatten()
+                    ptr, z_p = hierarchicalKMeansTree.search(x_p)
+                    z_p = z_p.reshape(w, w, ch)
+                    for i, k in enumerate(range((pos_y - W), (pos_y + W + 1))):
+                        for j, l in enumerate(range((pos_x - W), (pos_x + W + 1))):
+                            for m in range(ch):
+                                z_p_stacks[X_ind1d[k, l, m]].append(
+                                    z_p[i, j, m])
+                    diff += (blockPtrs[searchCnt] != ptr)
+                    blockPtrs[searchCnt] = ptr
+                    searchCnt += 1
+            if diff == 0:
                 break
             # Expectation: update x
-            allZpVec = allBlockVecs[blockPtrs].flatten()
-            sol, res, _r, _s = np.linalg.lstsq(CoefMat, allZpVec, rcond=None)
-            X = sol.reshape(Xr, Xc, -1)
-            print('itr:', itr, 'E:', res, 'elapsed:', time.time() - startTime, 'delta:', time.time() - currentTime)
+            E = 0
+            X = X.flatten()
+            for i, stack in enumerate(z_p_stacks):
+                arr = np.array(stack)
+                mu = arr.mean()
+                X[i] = mu
+                E += 0 if len(arr) == 1 else ((arr - mu)**2).sum()
+            X = X.reshape(Xr, Xc, ch)
+            # plt.imshow(X[:, :, [2, 1, 0]])
+            # plt.show()
+            print('itr:', itr, 'diff:', diff, 'E:', E,
+                  'elapsed:', time.time() - startTime,
+                  'delta:', time.time() - currentTime)
             itr += 1
 
         print('- synthesis converged')

@@ -11,8 +11,8 @@ def main():
     img = cv2.imread(texdir + texs[0])
 
     textureOptimization = TextureOptimization(0)
-    out = np.zeros((256, 256, 3))
-    result = textureOptimization.synthesis(img, out, 4)
+    out = np.zeros((512, 512, 3))
+    result = textureOptimization.synthesis(img, out, 16)
 
     name = 'result.jpeg'
     cv2.imwrite('./result/' + name, result)
