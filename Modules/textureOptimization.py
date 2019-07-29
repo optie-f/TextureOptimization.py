@@ -3,10 +3,29 @@ import time
 from sklearn.cluster import KMeans
 from numpy.lib.stride_tricks import as_strided
 import matplotlib.pyplot as plt
+import matplotlib.animation as animation
+
+
+class Timer:
+    def __init__(self):
+        self.startTime = time.time()
+
+    def startLap(self):
+        self.currentTime = time.time()
+
+    def printLap(self):
+        print('Lap:', self.sec2str(time.time() - self.currentTime))
+
+    def printTotal(self):
+        print('elapsed:', self.sec2str(time.time() - self.startTime))
+
+    def sec2str(self, time):
+        sec = int(time)
+        return '{0:02d}:{1:02d}:{2:02d}:{3:03d}'.format(sec // (60 * 60), sec // 60, sec % 60, int((time - sec) * 1000))
 
 
 class HierarchicalKMeansTree:
-    def __init__(self, X, k=4, thr=0.001):
+    def __init__(self, X, k=4, thr=0.01):
         """
         X: (N, d)
         """
@@ -63,12 +82,13 @@ class TextureOptimization:
         self.Z = [tex]
 
     def synthesis(self, Z, X, W, init=True):
-        startTime = time.time()
         """
         Z: input texture (r,c,ch)
         X: output (r,c,ch)
         W: width of a neighbourhood (from center to border)
         """
+        timer = Timer()
+
         Zr, Zc = Z.shape[:2]
         Z_viewSize = (
             Zr - W * 2,
@@ -86,11 +106,11 @@ class TextureOptimization:
         p_dim = w * w * ch
         allBlockVecs = blocks.reshape(N, p_dim)
         print('total block num of input:', N)
-        currentTime = time.time()
+
+        timer.startLap()
         hierarchicalKMeansTree = HierarchicalKMeansTree(allBlockVecs)
         print('- built Hierarchical K-Means Tree')
-        print('elapsed:', time.time() - startTime,
-              'delta:', time.time() - currentTime)
+        timer.printLap()
 
         Xr, Xc = X.shape[:2]
         p_rowRange = np.arange(W, Xr, W + 1)
@@ -111,8 +131,10 @@ class TextureOptimization:
         # 座標とチャンネルを指定すると1d-arrayとしてのindexが帰ってくる関数としての配列
         X_ind1d = np.arange(Xr * Xc * ch).reshape(Xr, Xc, ch)
 
+        fig = plt.figure(figsize=(5, 5))
+        ims = []
         while True:
-            currentTime = time.time()
+            timer.startLap()
             z_p_stacks = [[] for i in range(Xr * Xc * ch)]
             # Maximization: find nearest {z_p}
             diff = 0
@@ -131,7 +153,7 @@ class TextureOptimization:
                     diff += (blockPtrs[searchCnt] != ptr)
                     blockPtrs[searchCnt] = ptr
                     searchCnt += 1
-            if diff == 0:
+            if (diff == 0) | (itr >= 50):
                 break
             # Expectation: update x
             E = 0
@@ -142,14 +164,16 @@ class TextureOptimization:
                 X[i] = mu
                 E += 0 if len(arr) == 1 else ((arr - mu)**2).sum()
             X = X.reshape(Xr, Xc, ch)
-            # plt.imshow(X[:, :, [2, 1, 0]])
-            # plt.show()
-            print('itr:', itr, 'diff:', diff, 'E:', E,
-                  'elapsed:', time.time() - startTime,
-                  'delta:', time.time() - currentTime)
-            itr += 1
+            im = plt.imshow(X[:, :, [2, 1, 0]].astype('int').clip(0, 255), animated=True)
+            ims.append([im])
 
+            print('itr:', itr, 'diff:', diff, 'E:', E, end=' ')
+            itr += 1
+            timer.printLap()
+
+        fps = 8
+        self.animation = animation.ArtistAnimation(fig, ims, interval=1000 // fps, blit=True, repeat_delay=1000)
         print('- synthesis converged')
-        print('elapsed:', time.time() - startTime, 'sec')
+        timer.printTotal()
 
         return X

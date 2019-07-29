@@ -8,13 +8,13 @@ def main():
     texdir = './tex/'
     texs = os.listdir(texdir)
     texs.sort()
-    img = cv2.imread(texdir + texs[0])
+    img = cv2.imread(texdir + texs[1])
 
     textureOptimization = TextureOptimization(0)
     out = np.zeros((512, 512, 3))
-    result = textureOptimization.synthesis(img, out, 16)
+    result = textureOptimization.synthesis(img, out, 12)
 
-    name = 'result.jpeg'
+    name = texs[0].split('.')[0] + '_result.jpg'
     cv2.imwrite('./result/' + name, result)
 
 
