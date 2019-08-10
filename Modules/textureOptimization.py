@@ -1,27 +1,9 @@
 import numpy as np
-import time
 from sklearn.cluster import KMeans
+from sklearn.decomposition import PCA
 from numpy.lib.stride_tricks import as_strided
 import matplotlib.pyplot as plt
 import matplotlib.animation as animation
-
-
-class Timer:
-    def __init__(self):
-        self.startTime = time.time()
-
-    def startLap(self):
-        self.currentTime = time.time()
-
-    def printLap(self):
-        print('Lap:', self.sec2str(time.time() - self.currentTime))
-
-    def printTotal(self):
-        print('elapsed:', self.sec2str(time.time() - self.startTime))
-
-    def sec2str(self, time):
-        sec = int(time)
-        return '{0:02d}:{1:02d}:{2:02d}:{3:03d}'.format(sec // (60 * 60), sec // 60, sec % 60, int((time - sec) * 1000))
 
 
 class HierarchicalKMeansTree:
@@ -80,43 +62,44 @@ class HierarchicalKMeansTree:
 class TextureOptimization:
     def __init__(self, tex):
         self.Z = [tex]
+        self.history = []
 
-    def synthesis(self, Z, X, W, init=True):
+    def synthesis(self, Z, X, W, init=True, dimMax=100):
         """
         Z: input texture (r,c,ch)
         X: output (r,c,ch)
-        W: width of a neighbourhood (from center to border)
+        W: width of a patch
         """
-        timer = Timer()
+        step = W // 2
 
-        Zr, Zc = Z.shape[:2]
+        Zr, Zc, ch = Z.shape
         Z_viewSize = (
-            Zr - W * 2,
-            Zc - W * 2,
-            W * 2 + 1,
-            W * 2 + 1,
-            Z.shape[2]
+            Zr - step * 2,
+            Zc - step * 2,
+            W,
+            W,
+            ch
         )
         Z_strides = Z.strides[:2] + Z.strides
         # Z から取りうるすべてのブロック (w*w*ch) を縦横に並べた五次元配列
         blocks = as_strided(Z, Z_viewSize, Z_strides)
-        r, c, w, w, ch = blocks.shape
-        # ブロックをベクトル化したものを並べた二次元配列にする
-        N = r * c
-        p_dim = w * w * ch
-        allBlockVecs = blocks.reshape(N, p_dim)
-        print('total block num of input:', N)
+        r, c = blocks.shape[:2]
 
-        timer.startLap()
-        hierarchicalKMeansTree = HierarchicalKMeansTree(allBlockVecs)
-        print('- built Hierarchical K-Means Tree')
-        timer.printLap()
+        N = r * c
+        p_dim = W * W * ch
+        allBlockVecs = blocks.reshape(N, p_dim)
+        print('Search Space: N={N}, D={D} ', N=N, D=p_dim)
+
+        self.pca = None
+        if p_dim > dimMax:
+            self.pca = PCA(n_components=dimMax)
+            self.pca.fit(allBlockVecs)
 
         Xr, Xc = X.shape[:2]
-        p_rowRange = np.arange(W, Xr, W + 1)
-        p_colRange = np.arange(W, Xc, W + 1)
-        p_rowRange[-1] = Xr - W - 1
-        p_colRange[-1] = Xc - W - 1
+        p_rowRange = np.arange(0, Xr, step)
+        p_colRange = np.arange(0, Xc, step)
+        p_rowRange[-1] = min(p_rowRange[-1], Xr - step - 1)
+        p_colRange[-1] = min(p_colRange[-1], Xc - step - 1)
         row_p_num = len(p_rowRange)
         col_p_num = len(p_colRange)
 
@@ -134,7 +117,6 @@ class TextureOptimization:
         fig = plt.figure(figsize=(5, 5))
         ims = []
         while True:
-            timer.startLap()
             z_p_stacks = [[] for i in range(Xr * Xc * ch)]
             # Maximization: find nearest {z_p}
             diff = 0
@@ -164,7 +146,8 @@ class TextureOptimization:
                 X[i] = mu
                 E += 0 if len(arr) == 1 else ((arr - mu)**2).sum()
             X = X.reshape(Xr, Xc, ch)
-            im = plt.imshow(X[:, :, [2, 1, 0]].astype('int').clip(0, 255), animated=True)
+            im = plt.imshow(X[:, :, [2, 1, 0]].astype(
+                'int').clip(0, 255), animated=True)
             ims.append([im])
 
             print('itr:', itr, 'diff:', diff, 'E:', E, end=' ')
@@ -172,7 +155,8 @@ class TextureOptimization:
             timer.printLap()
 
         fps = 8
-        self.animation = animation.ArtistAnimation(fig, ims, interval=1000 // fps, blit=True, repeat_delay=1000)
+        self.animation = animation.ArtistAnimation(
+            fig, ims, interval=1000 // fps, blit=True, repeat_delay=1000)
         print('- synthesis converged')
         timer.printTotal()
 
