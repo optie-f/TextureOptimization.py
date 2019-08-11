@@ -10,12 +10,13 @@ def main():
     texs = os.listdir(texdir)
     texs.sort()
 
-    ws = [16, 32, 64]
+    ws = [34, 65, 74]
     Ow = 1024
     Oh = 1024
     for w in ws:
         for i, tex in enumerate(texs):
-            print(datetime.datetime.now().isoformat())
+            start = datetime.datetime.now()
+            print(start.isoformat())
             img = cv2.imread(texdir + tex)
 
             textureOptimization = TextureOptimization(img)
@@ -32,7 +33,10 @@ def main():
             cv2.imwrite('./result/' + outname, result)
 
             print(textureOptimization.history)
-            print(datetime.datetime.now().isoformat())
+            end = datetime.datetime.now()
+            print(end.isoformat())
+            print('time: ', end - start)
+            print("=======================")
 
 
 if __name__ == '__main__':

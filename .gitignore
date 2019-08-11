@@ -1,0 +1,16 @@
+.DS_Store
+*.ipynb
+__pycache__
+.vscode
+test.py
+
+info/
+lib/
+tex/*.jpg
+result/*.jpg
+process/*.jpg
+process/*.gif
+
+faiss*
+
+
