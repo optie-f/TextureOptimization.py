@@ -1,4 +1,4 @@
-from Modules.textureOptimization_gpu import TextureOptimization
+from Modules.textureOptimization import TextureOptimization
 import os
 import numpy as np
 import cv2

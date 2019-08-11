@@ -1,75 +1,24 @@
 import numpy as np
-from sklearn.cluster import KMeans
-from sklearn.decomposition import PCA
 from numpy.lib.stride_tricks import as_strided
+import scipy.sparse as spsp
+from sklearn.decomposition import PCA
 import matplotlib.pyplot as plt
 import matplotlib.animation as animation
-
-
-class HierarchicalKMeansTree:
-    def __init__(self, X, k=4, thr=0.01):
-        """
-        X: (N, d)
-        """
-        self.total_N = len(X)
-        self.indices = np.arange(len(X))
-        self.k = k
-        self.thr = thr
-        self.tree = self.__build__(X, self.indices)
-
-    def __build__(self, X, indices):
-        """
-        X: (N, d)
-        indices: (N)
-        """
-        if len(X) < self.thr * self.total_N:
-            return {
-                'isLeaf': True,
-                'entities': X,
-                'ptrs': indices
-            }
-
-        kmeans = KMeans(n_clusters=self.k, random_state=0).fit(X)
-        return {
-            'isLeaf': False,
-            'branches': [
-                {
-                    'center': kmeans.cluster_centers_[i],
-                    'node': self.__build__(X[kmeans.labels_ == i], indices[kmeans.labels_ == i])
-                }
-                for i in range(self.k)
-            ]
-        }
-
-    def search(self, x):
-        node = self.tree
-
-        while not node['isLeaf']:
-            argmin_ix = 0
-            min_dist = 99999999999
-            for i, branch in enumerate(node['branches']):
-                dist = np.sum((branch['center'] - x)**2)
-                if dist < min_dist:
-                    argmin_ix = i
-                    min_dist = dist
-            node = node['branches'][argmin_ix]['node']
-
-        dist = np.sum((node['entities'] - x)**2, axis=1)
-        argmin_ix = np.argmin(dist)
-        return node['ptrs'][argmin_ix], node['entities'][argmin_ix]
+import faiss
 
 
 class TextureOptimization:
     def __init__(self, tex):
-        self.Z = [tex]
+        self.Z = tex
         self.history = []
 
-    def synthesis(self, Z, X, W, init=True, dimMax=100):
+    def synthesis(self, Z, X, W, init=True, dimMax=200):
         """
         Z: input texture (r,c,ch)
         X: output (r,c,ch)
         W: width of a patch
         """
+        SynthInfo = {}
         step = W // 2
 
         Zr, Zc, ch = Z.shape
@@ -81,6 +30,7 @@ class TextureOptimization:
             ch
         )
         Z_strides = Z.strides[:2] + Z.strides
+
         # Z から取りうるすべてのブロック (w*w*ch) を縦横に並べた五次元配列
         blocks = as_strided(Z, Z_viewSize, Z_strides)
         r, c = blocks.shape[:2]
@@ -88,76 +38,103 @@ class TextureOptimization:
         N = r * c
         p_dim = W * W * ch
         allBlockVecs = blocks.reshape(N, p_dim)
-        print('Search Space: N={N}, D={D} ', N=N, D=p_dim)
 
         self.pca = None
         if p_dim > dimMax:
             self.pca = PCA(n_components=dimMax)
-            self.pca.fit(allBlockVecs)
+            self.pca = self.pca.fit(allBlockVecs)
+            DB = self.pca.transform(allBlockVecs)
+            print('dim. reduction: {0} -> {1}'.format(p_dim, dimMax))
+            print('explained cov. :', self.pca.explained_variance_ratio_.sum())
+        else:
+            DB = allBlockVecs
+
+        SynthInfo['N'] = N
+        SynthInfo['D'] = min(p_dim, dimMax)
+        print('Search Space: N={0}, D={1} '.format(
+            SynthInfo['N'], SynthInfo['D']))
+
+        res = faiss.StandardGpuResources()
+        flat_config = faiss.GpuIndexFlatConfig()
+        index = faiss.GpuIndexFlatL2(res, min(p_dim, dimMax), flat_config)
+        index.add(DB.astype('float32'))
+        print('index added')
 
         Xr, Xc = X.shape[:2]
-        p_rowRange = np.arange(0, Xr, step)
-        p_colRange = np.arange(0, Xc, step)
-        p_rowRange[-1] = min(p_rowRange[-1], Xr - step - 1)
-        p_colRange[-1] = min(p_colRange[-1], Xc - step - 1)
+        p_rowRange = np.arange(0, Xr - W, step)
+        p_colRange = np.arange(0, Xc - W, step)
         row_p_num = len(p_rowRange)
         col_p_num = len(p_colRange)
+        Q = row_p_num * col_p_num
 
+        CoefMat = spsp.lil_matrix((Q * p_dim, Xr * Xc * ch))
+        print('coefMat size: ({0},{1})'.format(Q * p_dim, Xr * Xc * ch))
+        ix_mat = np.zeros((Q, p_dim), dtype=int)
+        ix = np.arange(Xr * Xc * ch, dtype=int).reshape(Xr, Xc, ch)
+
+        Q_ix = 0
+        for (i, pos_y) in enumerate(p_rowRange):
+            for (j, pos_x) in enumerate(p_colRange):
+                # 出力画像をクエリに変換したい
+                coef_col_ix = ix[pos_y:(pos_y + W),
+                                 pos_x:(pos_x + W)].flatten()
+                ix_mat[i * col_p_num + j, :] = coef_col_ix
+
+                coef_row_ix = np.arange(Q_ix, Q_ix + p_dim)
+                for (row_ix, col_ix) in zip(coef_row_ix, coef_col_ix):
+                    CoefMat[row_ix, col_ix] = 1
+                Q_ix += p_dim
+
+        A = spsp.csr_matrix(CoefMat)
+        SynthInfo['Q'] = Q
+        print('query size: Q =', Q)
+
+        Ix = np.zeros(Q, dtype=int)
         itr = 0
-        print('x_p num:', row_p_num * col_p_num)
-        blockPtrs = np.zeros(row_p_num * col_p_num * ch, dtype='uint32')
+        fig = plt.figure(figsize=(15, 15))
+        ims = []
+        SynthInfo['iteration'] = []
 
         if init:
-            # 出力の初期化 簡単のため, 近傍がはみ出す部分も生成しておく
-            X = np.random.randint(0, 256, X.shape, dtype='uint8')
+            Ix = np.random.randint(Q, size=Q)
+            b = allBlockVecs[Ix].flatten()
+            sol, istop, itn, norm = spsp.linalg.lsmr(A, b)[:4]
+            X = sol.reshape(Xr, Xc, -1)
+            itr += 1
+            itrInfo = {"itr": itr, "log energy": norm,
+                       "lsmr istop": istop, "lsmr iter": itn}
+            SynthInfo['iteration'].append(itrInfo)
+            print(itrInfo)
 
-        # 座標とチャンネルを指定すると1d-arrayとしてのindexが帰ってくる関数としての配列
-        X_ind1d = np.arange(Xr * Xc * ch).reshape(Xr, Xc, ch)
-
-        fig = plt.figure(figsize=(5, 5))
-        ims = []
         while True:
-            z_p_stacks = [[] for i in range(Xr * Xc * ch)]
-            # Maximization: find nearest {z_p}
-            diff = 0
-            searchCnt = 0
-            for pos_y in p_rowRange:
-                for pos_x in p_colRange:
-                    x_p = X[(pos_y - W):(pos_y + W + 1),
-                            (pos_x - W):(pos_x + W + 1)].flatten()
-                    ptr, z_p = hierarchicalKMeansTree.search(x_p)
-                    z_p = z_p.reshape(w, w, ch)
-                    for i, k in enumerate(range((pos_y - W), (pos_y + W + 1))):
-                        for j, l in enumerate(range((pos_x - W), (pos_x + W + 1))):
-                            for m in range(ch):
-                                z_p_stacks[X_ind1d[k, l, m]].append(
-                                    z_p[i, j, m])
-                    diff += (blockPtrs[searchCnt] != ptr)
-                    blockPtrs[searchCnt] = ptr
-                    searchCnt += 1
-            if (diff == 0) | (itr >= 50):
-                break
-            # Expectation: update x
-            E = 0
-            X = X.flatten()
-            for i, stack in enumerate(z_p_stacks):
-                arr = np.array(stack)
-                mu = arr.mean()
-                X[i] = mu
-                E += 0 if len(arr) == 1 else ((arr - mu)**2).sum()
-            X = X.reshape(Xr, Xc, ch)
             im = plt.imshow(X[:, :, [2, 1, 0]].astype(
                 'int').clip(0, 255), animated=True)
             ims.append([im])
+            # Maximization: find nearest {z_p}
+            Query = X.flatten()[ix_mat]
+            if p_dim > dimMax:
+                Query = self.pca.transform(Query)
 
-            print('itr:', itr, 'diff:', diff, 'E:', E, end=' ')
+            _D, Ix_next = index.search(Query.astype('float32'), 1)
+
+            if np.all(Ix == Ix_next) | (itr > 100):
+                break
+            Ix = np.copy(Ix_next)
+
+            # Expectation: update x
+            b = allBlockVecs[Ix].flatten()
+            sol, istop, itn, norm = spsp.linalg.lsmr(A, b)[:4]
+            X = sol.reshape(Xr, Xc, -1)
             itr += 1
-            timer.printLap()
+            itrInfo = {"itr": itr, "log energy": norm,
+                       "lsmr istop": istop, "lsmr iter": itn}
+            SynthInfo['iteration'].append(itrInfo)
+            print(itrInfo)
 
         fps = 8
         self.animation = animation.ArtistAnimation(
             fig, ims, interval=1000 // fps, blit=True, repeat_delay=1000)
         print('- synthesis converged')
-        timer.printTotal()
+        self.history.append(SynthInfo)
 
         return X
